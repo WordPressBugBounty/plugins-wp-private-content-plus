@@ -269,3 +269,63 @@ function wppcp_rest_check_page_visibility($response, $post, $request) {
     return $response;
 }
 add_filter('rest_prepare_page', 'wppcp_rest_check_page_visibility', 10, 3);
+
+
+
+/**
+ * Exclude restricted posts from search queries.
+ */
+function exclude_restricted_posts_from_search( $query ) {
+    // Ensure this is a search query or REST API search
+    if ( ( $query->is_search && ! is_admin() && $query->is_main_query() ) || 
+         ( defined( 'REST_REQUEST' ) && REST_REQUEST && isset( $query->query_vars['s'] ) ) ) {
+
+        // Prevent infinite loop
+        if ( doing_action( 'pre_get_posts' ) && apply_filters( 'disable_restriction_checks', false ) ) {
+            return;
+        }
+
+        // Retrieve private content settings
+        $private_content_settings = get_option( 'wppcp_options' );
+
+        // 1. Handle Site Lockdown
+        $lockdown_data = $private_content_settings['site_lockdown'] ?? array();
+        if ( ( $lockdown_data['lockdown_status'] ?? 'disabled' ) === 'enabled' ) {
+            $allowed_posts = $lockdown_data['lockdown_allowed_posts'] ?? array();
+            $query->set( 'post__in', ! empty( $allowed_posts ) ? (array) $allowed_posts : array( 0 ) );
+            return; // Lockdown applied, no need to proceed further
+        }
+
+        // 2. Handle Global Post Restrictions
+        $global_restriction = $private_content_settings['global_page_restriction'] ?? array();
+        if ( ( $global_restriction['restrict_all_pages_status'] ?? '0' ) === '1' ) {
+            $query->set( 'post__in', array( 0 ) );
+            return; // Global restriction applied
+        }
+
+        // 3. Handle Meta-Based Restrictions (applies to any post type)
+        add_filter( 'disable_restriction_checks', '__return_true' ); // Disable restriction checks for get_posts
+        $args = array(
+            'post_type'   => 'any', // Include all post types
+            'meta_query'  => array(
+                array(
+                    'key'     => '_wppcp_post_page_visibility', // Meta key for restricted posts
+                    'value'   => array( 'member', 'role', 'users' ), // Values to block
+                    'compare' => 'IN', // Match any value in the array
+                ),
+            ),
+            'fields'      => 'ids', // Return only post IDs
+            'post_status' => 'publish',
+            'numberposts' => -1,
+        );
+
+        $restricted_posts = get_posts( $args );
+        remove_filter( 'disable_restriction_checks', '__return_true' ); // Re-enable restriction checks
+
+        if ( ! empty( $restricted_posts ) ) {
+            $query->set( 'post__not_in', $restricted_posts );
+        }
+    }
+}
+add_filter( 'pre_get_posts', 'exclude_restricted_posts_from_search' );
+
